@@ -1,0 +1,782 @@
+Miglioramenti per LiveScoreApp
+1. Gestione degli errori e robustezza
+API Wrapper migliorato
+pythonCopy# api_wrapper.py
+import http.client
+import json
+import os
+import time
+from functools import wraps
+import logging
+
+# Configurazione logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configura l'host e l'API key
+RAPIDAPI_HOST = "allsportsapi2.p.rapidapi.com"
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+
+# Decorator per gestire i tentativi di riconnessione
+def retry_on_failure(max_retries=3, delay=2):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Tentativo {retries}/{max_retries} fallito: {str(e)}")
+                    if retries == max_retries:
+                        logger.error(f"Numero massimo di tentativi raggiunto: {str(e)}")
+                        return {"error": f"Errore di connessione dopo {max_retries} tentativi: {str(e)}"}
+                    time.sleep(delay)
+            return {"error": "Errore generico nella chiamata API"}
+        return wrapper
+    return decorator
+
+# Funzione base per chiamate API con miglior gestione errori
+@retry_on_failure()
+def make_api_request(endpoint):
+    if not RAPIDAPI_KEY:
+        logger.error("API Key non configurata")
+        return {"error": "API Key non configurata"}
+    
+    conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
+    headers = {
+        'x-rapidapi-key': RAPIDAPI_KEY,
+        'x-rapidapi-host': RAPIDAPI_HOST
+    }
+
+    try:
+        conn.request("GET", endpoint, headers=headers)
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Errore API HTTP {res.status}: {res.reason}")
+            return {"error": f"Errore API HTTP {res.status}: {res.reason}"}
+            
+        try:
+            return json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            logger.error(f"Errore nella decodifica JSON: {str(e)}")
+            return {"error": "Errore nella decodifica della risposta API"}
+    except Exception as e:
+        logger.error(f"Errore di connessione: {str(e)}")
+        raise e
+    finally:
+        conn.close()
+
+# Le funzioni specifiche ora usano la funzione base
+def fetch_live_matches():
+    return make_api_request("/api/matches/live")
+
+def fetch_match_details(match_id):
+    return make_api_request(f"/api/match/{match_id}")
+
+def fetch_match_statistics(match_id):
+    return make_api_request(f"/api/match/{match_id}/statistics")
+
+def fetch_match_incidents(match_id):
+    return make_api_request(f"/api/match/{match_id}/incidents")
+
+def fetch_match_scorers(match_id):
+    return make_api_request(f"/api/match/{match_id}/highlights")
+
+def fetch_tournament_logo(tournament_id):
+    return f"https://allsportsapi2.p.rapidapi.com/api/tournament/{tournament_id}/image"
+2. Caching dei dati
+Sistema di cache
+pythonCopy# cache.py
+import time
+import json
+import os
+from functools import wraps
+
+class Cache:
+    def __init__(self, cache_dir="./cache", ttl=300):  # TTL di 5 minuti di default
+        self.cache_dir = cache_dir
+        self.ttl = ttl
+        
+        # Crea la directory cache se non esiste
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+    
+    def get(self, key):
+        """Ottiene un valore dalla cache"""
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        
+        if os.path.exists(cache_file):
+            # Verifica la freschezza della cache
+            file_time = os.path.getmtime(cache_file)
+            if time.time() - file_time <= self.ttl:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+        
+        return None
+    
+    def set(self, key, value):
+        """Salva un valore nella cache"""
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        
+        with open(cache_file, 'w') as f:
+            json.dump(value, f)
+    
+    def clear(self):
+        """Pulisce tutta la cache"""
+        for file in os.listdir(self.cache_dir):
+            if file.endswith(".json"):
+                os.remove(os.path.join(self.cache_dir, file))
+
+# Decorator per il caching
+def cached(cache_instance, key_prefix):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Genera una chiave basata su prefisso e argomenti
+            key = f"{key_prefix}_{'_'.join(str(arg) for arg in args)}"
+            
+            # Prova a ottenere dalla cache
+            cached_result = cache_instance.get(key)
+            if cached_result is not None:
+                return cached_result
+            
+            # Se non in cache, esegui la funzione
+            result = func(*args, **kwargs)
+            
+            # Se la funzione ha avuto successo, salva in cache
+            if "error" not in result:
+                cache_instance.set(key, result)
+                
+            return result
+        return wrapper
+    return decorator
+3. Implementazione migliorata in app.py
+pythonCopy# app.py
+import os
+import json
+from flask import Flask, render_template, jsonify, request, redirect, url_for
+import openai
+from datetime import datetime
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+# Import dal nuovo API wrapper
+from api_wrapper import (fetch_live_matches,
+                     fetch_match_details,
+                     fetch_match_statistics,
+                     fetch_match_scorers,
+                     fetch_match_incidents,
+                     fetch_tournament_logo)
+
+# Import del nuovo sistema di cache
+from cache import Cache, cached
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app)  # Supporto per proxy
+
+# Inizializza il sistema di caching con TTL diversi per diversi tipi di dati
+match_cache = Cache(cache_dir="./cache/matches", ttl=60)  # 1 minuto per dati live
+detail_cache = Cache(cache_dir="./cache/details", ttl=120)  # 2 minuti per dettagli
+
+# Imposta API Key per OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Applicazione del caching alle funzioni API
+@cached(match_cache, "live_matches")
+def get_live_matches():
+    return fetch_live_matches()
+
+@cached(detail_cache, "match_details")
+def get_match_details(match_id):
+    return fetch_match_details(match_id)
+
+@cached(detail_cache, "match_statistics")
+def get_match_statistics(match_id):
+    return fetch_match_statistics(match_id)
+
+@cached(detail_cache, "match_incidents")
+def get_match_incidents(match_id):
+    return fetch_match_incidents(match_id)
+
+# Funzione migliorata per il commento
+def generate_commentary(match_data, statistics, incidents):
+    """Genera un commento dettagliato sulla partita con stile giornalistico."""
+    
+    if not openai.api_key:
+        return "API Key OpenAI non configurata."
+
+    if "error" in match_data:
+        return f"Errore nei dati partita: {match_data['error']}"
+    
+    if not match_data or "event" not in match_data:
+        return "Dati partita non validi o incompleti."
+
+    try:
+        home_team = match_data["event"]["homeTeam"]["name"]
+        away_team = match_data["event"]["awayTeam"]["name"]
+        home_score = match_data["event"]["homeScore"]["display"]
+        away_score = match_data["event"]["awayScore"]["display"]
+        status = match_data["event"]["status"]["description"]
+        
+        match_phase = f"La partita è attualmente in corso ({status})."
+        if any(phrase in status for phrase in ["HT", "Intervallo", "Half-time"]):
+            match_phase = "Il primo tempo si è appena concluso."
+        elif any(phrase in status for phrase in ["FT", "Terminata", "Full-time"]):
+            match_phase = "La partita è terminata."
+
+        # Prepara le statistiche in formato strutturato
+        stats_text = ""
+        if statistics and "statistics" in statistics and not "error" in statistics:
+            for stat_group in statistics["statistics"]:
+                if stat_group["period"] == "ALL":
+                    for group in stat_group["groups"]:
+                        stats_text += f"{group['groupName']}:\n"
+                        for stat in group["statisticsItems"]:
+                            stats_text += f"- {stat['name']}: {home_team} {stat['home']} - {stat['away']} {away_team}\n"
+
+        # Prepara gli eventi salienti
+        event_text = ""
+        if incidents and "incidents" in incidents and not "error" in incidents:
+            for event in incidents["incidents"]:
+                team_name = event.get("team", {}).get("name", "Sconosciuto")
+                if event["incidentType"] == "goal":
+                    event_text += f"⚽ Gol di {event['player']['name']} per il {team_name} al minuto {event['time']}!\n"
+                elif event["incidentType"] == "card":
+                    if event["incidentClass"] == "yellow":
+                        event_text += f"🟨 Ammonizione per {event['player']['name']} ({team_name}) al {event['time']}'.\n"
+                    elif event["incidentClass"] == "red":
+                        event_text += f"🟥 ESPULSIONE! {event['player']['name']} del {team_name} al {event['time']}'.\n"
+                elif event["incidentType"] == "substitution":
+                    event_text += f"🔄 Cambio: {event['playerOut']['name']} esce, entra {event['playerIn']['name']} per il {team_team} al {event['time']}'.\n"
+
+        # Prompt per ChatGPT
+        prompt = f"""
+        Sei un commentatore sportivo esperto. Scrivi un commento coinvolgente e realistico sulla partita tra {home_team} e {away_team}.
+        {match_phase}
+        
+        RISULTATO ATTUALE: {home_team} {home_score} - {away_score} {away_team}
+
+        EVENTI SALIENTI:
+        {event_text}
+
+        STATISTICHE CHIAVE:
+        {stats_text}
+
+        Crea un'analisi dettagliata dello svolgimento della partita, parlando di chi sta dominando, eventuali sorprese e le prestazioni dei giocatori chiave.
+        Il commento deve essere in stile giornalistico, avvincente e descrivere l'atmosfera della gara.
+        """
+
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "system", "content": "Fornisci un'analisi coinvolgente della partita."},
+                          {"role": "user", "content": prompt}]
+            )
+            return response["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            return f"Errore nella generazione del commento: {str(e)}"
+            
+    except KeyError as e:
+        return f"Errore nell'elaborazione dei dati: {str(e)}"
+    except Exception as e:
+        return f"Errore imprevisto: {str(e)}"
+
+@app.route("/")
+def index():
+    try:
+        live_matches = get_live_matches()
+        
+        if "error" in live_matches:
+            return render_template("index.html", error=live_matches["error"])
+
+        # Raggruppiamo le partite per Paese e Competizione
+        grouped_matches = {}
+        logos = {}  # Dizionario per i logo dei tornei
+        
+        for match in live_matches.get("events", []):
+            country = match["tournament"]["category"]["name"]
+            tournament_id = match["tournament"]["id"]
+            tournament_name = match["tournament"]["name"]
+
+            # Memorizza l'URL del logo
+            if tournament_id not in logos:
+                logos[tournament_id] = fetch_tournament_logo(tournament_id)
+
+            # Creiamo la struttura raggruppata
+            if country not in grouped_matches:
+                grouped_matches[country] = {}
+            if tournament_name not in grouped_matches[country]:
+                grouped_matches[country][tournament_name] = []
+            
+            grouped_matches[country][tournament_name].append(match)
+
+        # Aggiungiamo data e ora corrente per mostrare quando è stato fatto l'ultimo aggiornamento
+        now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        
+        return render_template("index.html", matches=grouped_matches, logos=logos, last_updated=now)
+    
+    except Exception as e:
+        return render_template("error.html", error=str(e))
+
+@app.route("/match/<match_id>")
+def match_details(match_id):
+    try:
+        match_data = get_match_details(match_id)
+        
+        # Verifica errori nella risposta API
+        if "error" in match_data:
+            return render_template("error.html", error=match_data["error"])
+        
+        # Se è richiesto il commento AI, lo generiamo
+        generate_ai = request.args.get('ai', 'false').lower() == 'true'
+        commento_chatgpt = None
+        
+        if generate_ai:
+            statistics = get_match_statistics(match_id)
+            incidents = get_match_incidents(match_id)
+            commento_chatgpt = generate_commentary(match_data, statistics, incidents)
+            return render_template("match.html", 
+                                match=match_data,
+                                statistics=statistics,
+                                incidents=incidents,
+                                commento=commento_chatgpt)
+        else:
+            # Versione semplice senza commento AI
+            return render_template("match.html", match=match_data)
+            
+    except Exception as e:
+        return render_template("error.html", error=str(e))
+
+@app.route("/refresh")
+def refresh_data():
+    """Aggiorna esplicitamente i dati pulendo la cache"""
+    try:
+        match_cache.clear()
+        return redirect(url_for('index'))
+    except Exception as e:
+        return render_template("error.html", error=f"Errore durante l'aggiornamento dei dati: {str(e)}")
+
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_template('error.html', error="Pagina non trovata"), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return render_template('error.html', error="Errore interno del server"), 500
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG", "false").lower() == "true")
+4. Template HTML migliorato (index.html)
+htmlCopy<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Score - Risultati in diretta</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #0056b3;
+            --secondary-color: #f8f9fa;
+            --accent-color: #28a745;
+            --text-color: #333;
+            --light-text: #f8f9fa;
+            --border-color: #dee2e6;
+            --hover-color: #0062cc;
+            --card-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            min-height: 100vh;
+            background-color: #f0f2f5;
+            color: var(--text-color);
+        }
+        
+        .sidebar {
+            width: 280px;
+            background: linear-gradient(to bottom, #1e3c72, #2a5298);
+            color: white;
+            padding: 20px;
+            height: 100vh;
+            overflow-y: auto;
+            position: fixed;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+            z-index: 100;
+        }
+        
+        .logo {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .logo i {
+            margin-right: 10px;
+            color: var(--accent-color);
+        }
+        
+        .sidebar h3 {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+            font-size: 16px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .sidebar ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        
+        .sidebar li {
+            cursor: pointer;
+            padding: 12px 15px;
+            margin-bottom: 2px;
+            border-radius: 5px;
+            transition: background 0.3s;
+        }
+        
+        .sidebar li:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .sidebar li.active {
+            background: var(--accent-color);
+        }
+        
+        .dropdown {
+            display: none;
+            padding-left: 15px;
+            margin-top: 5px;
+        }
+        
+        .dropdown li {
+            padding: 8px 15px;
+            font-size: 14px;
+            border-left: 2px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .content {
+            margin-left: 280px;
+            padding: 20px;
+            flex: 1;
+            max-width: 1200px;
+        }
+        
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+        
+        .sub-title {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        
+        .action-buttons button {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        
+        .action-buttons button:hover {
+            background: var(--hover-color);
+        }
+        
+        .action-buttons i {
+            margin-right: 5px;
+        }
+        
+        .match-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        
+        .match-card {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: var(--card-shadow);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+        }
+        
+        .match-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+        }
+        
+        .match-header {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 10px 15px;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .tournament-name {
+            font-weight: bold;
+        }
+        
+        .match-status {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        
+        .match-status.live {
+            background-color: #dc3545;
+            animation: pulse 2s infinite;
+        }
+        
+        .match-status.paused {
+            background-color: #ffc107;
+        }
+        
+        .match-status.finished {
+            background-color: #6c757d;
+        }
+        
+        .match-body {
+            padding: 15px;
+        }
+        
+        .teams {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .team {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            width: 40%;
+        }
+        
+        .team-name {
+            margin-top: 5px;
+            font-weight: 600;
+        }
+        
+        .score-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 20%;
+            padding: 8px;
+            font-size: 20px;
+            font-weight: bold;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        
+        .match-time {
+            text-align: center;
+            font-size: 14px;
+            color: #6c757d;
+            margin-top: 10px;
+        }
+        
+        .match-footer {
+            padding: 10px 15px;
+            background: #f8f9fa;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+        
+        .match-venue {
+            color: #6c757d;
+        }
+        
+        .match-details-link {
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 600;
+        }
+        
+        .match-details-link:hover {
+            text-decoration: underline;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: var(--card-shadow);
+        }
+        
+        .empty-state i {
+            font-size: 48px;
+            color: #adb5bd;
+            margin-bottom: 15px;
+        }
+        
+        .empty-state h3 {
+            margin: 0;
+            margin-bottom: 10px;
+            color: #495057;
+        }
+        
+        .empty-state p {
+            color: #6c757d;
+            margin-bottom: 20px;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        
+        /* Responsive */
+        @media (max-width: 992px) {
+            .sidebar {
+                width: 220px;
+            }
+            .content {
+                margin-left: 220px;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            body {
+                flex-direction: column;
+            }
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+                padding: 10px;
+            }
+            .content {
+                margin-left: 0;
+                padding: 15px;
+            }
+            .match-container {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="logo">
+            <i class="fas fa-futbol"></i> LiveScore
+        </div>
+        <h3>Campionati</h3>
+        <ul id="tournament-list">
+            <li onclick="filterMatches('Tutti')" class="active">
+                <i class="fas fa-globe"></i> Tutte le partite
+            </li>
+            
+            <!-- Cicliamo per Paese e Tornei -->
+            {% for country, tournaments in matches.items() %}
+                <li onclick="toggleDropdown('{{ country|replace(' ', '_') }}')">
+                    <i class="fas fa-chevron-right"></i> {{ country }}
+                </li>
+                <ul id="{{ country|replace(' ', '_') }}" class="dropdown">
+                    {% for tournament, match_list in tournaments.items() %}
+                        <li onclick="filterMatches('{{ tournament }}')">
+                            {{ tournament }} ({{ match_list|length }})
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <div class="content">
+        <div class="page-header">
+            <div>
+                <div class="title">Risultati in diretta</div>
+                <div class="sub-title">Aggiornato: {{ last_updated }}</div>
+            </div>
+            <div class="action-buttons">
+                <button onclick="location.href='/refresh'">
+                    <i class="fas fa-sync-alt"></i> Aggiorna
+                </button>
+            </div>
+        </div>
+
+        <div id="matches-container" class="match-container">
+            {% set total_matches = 0 %}
+            {% for country, tournaments in matches.items() %}
+                {% for tournament, match_list in tournaments.items() %}
+                    {% for match in match_list %}
+                        {% set total_matches = total_matches + 1 %}
+                        <div class="match-card" data-competition="{{ tournament }}" onclick="location.href='/match/{{ match.id }}'">
+                            <div class="match-header">
+                                <div class="tournament-name">{{ tournament }}</div>
+                                <div class="match-status {% if 'LIVE' in match.status.description %}live{% elif 'HT' in match.status.description %}paused{% elif 'FT' in match.status.description %}finished{% endif %}">
+                                    {{ match.status.description }}
+                                </div>
+                            </div>
+                            <div class="match-body">
+                                <div class="teams">
+                                    <div class="team">
+                                        {% if match.homeTeam.logo %}
+                                            <img src="{{ match.homeTeam.logo }}" alt="{{ match.homeTeam.name }}" width="40" height="40">
+                                        {% else %}
+                                            <i class="fas fa-shield-alt" style="font-size: 24px; color: #ccc;"></i>
+                                        {% endif %}
+                                        <div class="team-name">{{ match.homeTeam.name }}</div>
+                                    </div>
+                                    <div class="score-container">
+                                        {{ match.homeScore.display }} - {{ match.awayScore.display }}
+                                    </div>
+                                    <div class="team">
+                                        {% if match.awayTeam.logo %}
+                                            <img src="{{ match.awayTeam.logo }}" alt="{{ match.awayTeam.name }}" width="40" height="40">
+                                        {% else %}
+                                            <i class="fas fa-shield-alt" style="font-size: 24px; color: #ccc;"></i>
+                                        {% endif %}
+                                        <div class="team-name">{{ match.awayTeam.name }}</div>
+                                    </div>
+                                </div>
+                                <div class="match-time">
+                                    {% if match.startTimestamp %}
+                                        {{ match.startTimestamp|int|strftime('%H:%M') }}
+                                    {% else %}
+                                        Orario non disponibile
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="match-footer">

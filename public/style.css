@@ -1,0 +1,157 @@
+/* Impostazioni base */
+body {
+  margin: 0;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  background-color: #121212;
+  color: #f1f1f1;
+}
+
+header {
+  background-color: #1f1f1f;
+  padding: 20px;
+  text-align: center;
+  border-bottom: 1px solid #333;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+/* Pannello di controllo */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 15px;
+  background-color: #1f1f1f;
+  border-bottom: 1px solid #333;
+}
+
+.toggle-button {
+  padding: 10px 15px;
+  border: none;
+  background-color: #333;
+  color: #f1f1f1;
+  font-size: 1rem;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.toggle-button.active,
+.toggle-button:hover {
+  background-color: #ff9800;
+}
+
+#competitionFilter {
+  padding: 8px;
+  font-size: 1rem;
+  border-radius: 5px;
+  border: 1px solid #333;
+  background-color: #1e1e1e;
+  color: #f1f1f1;
+}
+
+/* Container dei match */
+.container {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+  padding: 20px;
+}
+
+/* Stile della card */
+.card {
+  background-color: #1e1e1e;
+  border-radius: 10px;
+  padding: 15px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+  transition: transform 0.2s;
+}
+.card:hover {
+  transform: translateY(-5px);
+}
+
+/* Sezione informazioni del campionato */
+.league-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #333;
+  padding-bottom: 5px;
+}
+.league-info img.league-logo {
+  width: 30px;
+  height: 30px;
+}
+.league-info .league-name {
+  font-weight: bold;
+  font-size: 1rem;
+}
+.league-info .league-round {
+  font-size: 0.85rem;
+  color: #bbbbbb;
+}
+
+/* Sezione squadre */
+.teams-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 10px 0;
+}
+.team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.team img.team-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+.team .team-name {
+  font-size: 1rem;
+}
+.team .team-score {
+  font-size: 1.2rem;
+  font-weight: bold;
+  color: #ff9800;
+}
+
+/* Informazioni sulla partita */
+.match-info {
+  font-size: 0.85rem;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.match-info span {
+  display: block;
+  color: #cccccc;
+}
+
+/* Eventi (per partite live) */
+.events-container {
+  background-color: #2a2a2a;
+  padding: 8px;
+  border-radius: 5px;
+  margin-top: 10px;
+}
+.events-container h4 {
+  margin: 0 0 5px;
+  font-size: 0.95rem;
+  color: #ff9800;
+}
+.event {
+  font-size: 0.8rem;
+  margin-bottom: 4px;
+}
+.event span {
+  margin-right: 5px;
+  color: #bbbbbb;
+}

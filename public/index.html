@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Risultati Partite – API Sports</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Risultati Partite</h1>
+  </header>
+  
+  <!-- Pannello di controllo: toggle e filtro -->
+  <div id="controls" class="controls">
+    <button id="btnLive" class="toggle-button active">Partite Live</button>
+    <button id="btnFinished" class="toggle-button">Partite Finite</button>
+    <button id="btnToday" class="toggle-button">Programmate per Oggi</button>
+    <select id="competitionFilter">
+      <option value="all">Tutte le competizioni</option>
+    </select>
+  </div>
+  
+  <main>
+    <!-- Container dove verrà mostrata la lista dei match -->
+    <div id="matchesContainer" class="container"></div>
+  </main>
+  <script src="script.js"></script>
+</body>
+</html>

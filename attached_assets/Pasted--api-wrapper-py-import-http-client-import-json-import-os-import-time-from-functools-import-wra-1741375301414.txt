@@ -1,0 +1,87 @@
+# api_wrapper.py
+import http.client
+import json
+import os
+import time
+from functools import wraps
+import logging
+
+# Configurazione logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configura l'host e l'API key
+RAPIDAPI_HOST = "allsportsapi2.p.rapidapi.com"
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+
+# Decorator per gestire i tentativi di riconnessione
+def retry_on_failure(max_retries=3, delay=2):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Tentativo {retries}/{max_retries} fallito: {str(e)}")
+                    if retries == max_retries:
+                        logger.error(f"Numero massimo di tentativi raggiunto: {str(e)}")
+                        return {"error": f"Errore di connessione dopo {max_retries} tentativi: {str(e)}"}
+                    time.sleep(delay)
+            return {"error": "Errore generico nella chiamata API"}
+        return wrapper
+    return decorator
+
+# Funzione base per chiamate API con miglior gestione errori
+@retry_on_failure()
+def make_api_request(endpoint):
+    if not RAPIDAPI_KEY:
+        logger.error("API Key non configurata")
+        return {"error": "API Key non configurata"}
+    
+    conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
+    headers = {
+        'x-rapidapi-key': RAPIDAPI_KEY,
+        'x-rapidapi-host': RAPIDAPI_HOST
+    }
+
+    try:
+        conn.request("GET", endpoint, headers=headers)
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Errore API HTTP {res.status}: {res.reason}")
+            return {"error": f"Errore API HTTP {res.status}: {res.reason}"}
+            
+        try:
+            return json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            logger.error(f"Errore nella decodifica JSON: {str(e)}")
+            return {"error": "Errore nella decodifica della risposta API"}
+    except Exception as e:
+        logger.error(f"Errore di connessione: {str(e)}")
+        raise e
+    finally:
+        conn.close()
+
+# Le funzioni specifiche ora usano la funzione base
+def fetch_live_matches():
+    return make_api_request("/api/matches/live")
+
+def fetch_match_details(match_id):
+    return make_api_request(f"/api/match/{match_id}")
+
+def fetch_match_statistics(match_id):
+    return make_api_request(f"/api/match/{match_id}/statistics")
+
+def fetch_match_incidents(match_id):
+    return make_api_request(f"/api/match/{match_id}/incidents")
+
+def fetch_match_scorers(match_id):
+    return make_api_request(f"/api/match/{match_id}/highlights")
+
+def fetch_tournament_logo(tournament_id):
+    return f"https://allsportsapi2.p.rapidapi.com/api/tournament/{tournament_id}/image"
